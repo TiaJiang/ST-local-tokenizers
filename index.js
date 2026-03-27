@@ -1,5 +1,5 @@
-import { extension_settings } from '../../extensions.js';
-import { saveSettingsDebounced } from '../../../script.js';
+import { extension_settings } from '../../../extensions.js';
+import { saveSettingsDebounced } from '../../../../script.js';
 
 const MODULE_KEY = 'localTokenEstimator';
 
