@@ -1,7 +1,7 @@
 import { extension_settings } from '../../../extensions.js';
 import { saveSettingsDebounced } from '../../../../script.js';
 
-const MODULE_KEY = 'localTokenEstimator';
+const MODULE_KEY = 'localTokenizers';
 
 const DEFAULTS = {
     enabled: true,
@@ -18,7 +18,7 @@ const DEFAULTS = {
 let patched = false;
 
 function getSettings() {
-    if (!extension_settings[MODULE_KEY]) {
+    if (!extension_settings[MODULE_KEY] || typeof extension_settings[MODULE_KEY] !== 'object') {
         extension_settings[MODULE_KEY] = { ...DEFAULTS };
     }
 
@@ -37,7 +37,9 @@ function clamp(value, min, max, fallback) {
 }
 
 function guesstimateText(str) {
-    if (typeof str !== 'string' || str.length === 0) return 0;
+    if (typeof str !== 'string' || str.length === 0) {
+        return 0;
+    }
 
     const s = getSettings();
 
@@ -62,7 +64,9 @@ function guesstimateText(str) {
 }
 
 function stringifyMessage(message) {
-    if (!message || typeof message !== 'object') return '';
+    if (!message || typeof message !== 'object') {
+        return '';
+    }
 
     const chunks = [];
 
@@ -114,32 +118,41 @@ function estimateTokenCountFromRequestBody(data) {
         messages = [messages];
     }
 
-    // 对齐 ST 原始逻辑
+    // 与 ST 现有逻辑保持一致
     let tokenCount = -1;
-
     for (const message of messages) {
         tokenCount += guesstimateText(stringifyMessage(message));
     }
-
     return tokenCount;
 }
 
-function isOpenAiCountRequest(options) {
-    const url = String(options?.url || '');
-    return url.startsWith('/api/tokenizers/openai/count');
+function extractAjaxOptions(args) {
+    // 兼容 $.ajax(options) 和 $.ajax(url, options)
+    if (args.length > 0 && typeof args[0] === 'string') {
+        return { ...(args[1] || {}), url: args[0] };
+    }
+    if (args.length > 0 && typeof args[0] === 'object') {
+        return args[0] || {};
+    }
+    return {};
+}
+
+function isOpenAiCountRequest(url) {
+    const u = String(url || '');
+    return u.includes('/api/tokenizers/openai/count');
 }
 
 function patchJQueryAjax() {
-    if (patched || !window.jQuery?.ajax) return;
-    patched = true;
+    if (patched || !window.jQuery || !window.jQuery.ajax) return false;
 
     const originalAjax = window.jQuery.ajax.bind(window.jQuery);
+    patched = true;
 
     window.jQuery.ajax = function patchedAjax(...args) {
-        const options = (args.length > 0 && typeof args[0] === 'object') ? args[0] : {};
-        const settings = getSettings();
+        const options = extractAjaxOptions(args);
+        const s = getSettings();
 
-        if (!settings.enabled || !isOpenAiCountRequest(options)) {
+        if (!s.enabled || !isOpenAiCountRequest(options.url)) {
             return originalAjax(...args);
         }
 
@@ -150,37 +163,40 @@ function patchJQueryAjax() {
             try {
                 options.success(payload);
             } catch (err) {
-                console.warn('[Local Token Estimator] success callback failed', err);
+                console.warn('[Local Tokenizers] success callback failed', err);
             }
         }
 
         const dfd = window.jQuery.Deferred();
         dfd.resolve(payload);
+
+        console.debug('[Local Tokenizers] intercepted:', options.url, '=>', token_count);
         return dfd.promise();
     };
 
-    console.log('[Local Token Estimator] Ajax hook enabled');
+    console.info('[Local Tokenizers] ajax hook installed');
+    return true;
 }
 
 function injectSettingsUi() {
-    if (document.getElementById('lte_settings_block')) return;
+    if (document.getElementById('local_tokenizers_settings_block')) return;
 
     const html = `
-<div id="lte_settings_block" class="inline-drawer">
+<div id="local_tokenizers_settings_block" class="inline-drawer">
     <div class="inline-drawer-toggle inline-drawer-header">
-        <b>Local Token Estimator</b>
+        <b>Local Tokenizers</b>
     </div>
     <div class="inline-drawer-content">
         <label class="checkbox_label">
-            <input id="lte_enabled" type="checkbox" />
+            <input id="local_tokenizers_enabled" type="checkbox" />
             启用本地 token 估算拦截
         </label>
 
         <div style="margin-top: 8px;">
-            <label for="lte_safety_multiplier">Safety Multiplier</label>
+            <label for="local_tokenizers_safety_multiplier">Safety Multiplier</label>
             <div style="display: flex; gap: 8px; align-items: center;">
-                <input id="lte_safety_multiplier" type="range" min="1.00" max="1.30" step="0.01" style="flex: 1;" />
-                <input id="lte_safety_multiplier_num" type="number" min="1.00" max="1.30" step="0.01" style="width: 84px;" />
+                <input id="local_tokenizers_safety_multiplier" type="range" min="1.00" max="1.30" step="0.01" style="flex: 1;" />
+                <input id="local_tokenizers_safety_multiplier_num" type="number" min="1.00" max="1.30" step="0.01" style="width: 84px;" />
             </div>
             <small>越大越保守（高估越多）。建议 1.06 ~ 1.12。</small>
         </div>
@@ -197,9 +213,14 @@ function injectSettingsUi() {
 
     const s = getSettings();
 
-    const enabled = /** @type {HTMLInputElement} */ (document.getElementById('lte_enabled'));
-    const slider = /** @type {HTMLInputElement} */ (document.getElementById('lte_safety_multiplier'));
-    const number = /** @type {HTMLInputElement} */ (document.getElementById('lte_safety_multiplier_num'));
+    const enabled = document.getElementById('local_tokenizers_enabled');
+    const slider = document.getElementById('local_tokenizers_safety_multiplier');
+    const number = document.getElementById('local_tokenizers_safety_multiplier_num');
+
+    if (!(enabled instanceof HTMLInputElement) || !(slider instanceof HTMLInputElement) || !(number instanceof HTMLInputElement)) {
+        console.warn('[Local Tokenizers] settings UI bind failed');
+        return;
+    }
 
     enabled.checked = !!s.enabled;
     slider.value = String(s.safetyMultiplier);
@@ -221,8 +242,22 @@ function injectSettingsUi() {
     number.addEventListener('input', () => syncMultiplier(number.value));
 }
 
-jQuery(() => {
+function boot() {
     getSettings();
-    patchJQueryAjax();
     injectSettingsUi();
+}
+
+// 先尽早安装 ajax hook，避免错过早期请求
+(function installHookEarly(retry = 0) {
+    if (patchJQueryAjax()) return;
+    if (retry < 120) {
+        setTimeout(() => installHookEarly(retry + 1), 50);
+    } else {
+        console.warn('[Local Tokenizers] failed to install ajax hook in time');
+    }
+})();
+
+// DOM 就绪后再挂设置 UI
+jQuery(() => {
+    boot();
 });
