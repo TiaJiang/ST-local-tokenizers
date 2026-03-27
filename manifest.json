@@ -1,0 +1,9 @@
+{
+    "display_name": "Local Tokenizers",
+    "loading_order": 1,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "author": "TiaJiang",
+    "version": "0.1.0"
+}
