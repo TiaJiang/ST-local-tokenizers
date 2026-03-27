@@ -15,7 +15,7 @@ const DEFAULTS = {
     codeFencePenalty: 2.0,
 };
 
-let patched = false;
+let isPatched = false;
 
 function getSettings() {
     if (!extension_settings[MODULE_KEY] || typeof extension_settings[MODULE_KEY] !== 'object') {
@@ -118,12 +118,16 @@ function estimateTokenCountFromRequestBody(data) {
         messages = [messages];
     }
 
-    // 与 ST 现有逻辑保持一致
+    // 与 ST 现有 countTokensOpenAIAsync 对齐
     let tokenCount = -1;
     for (const message of messages) {
         tokenCount += guesstimateText(stringifyMessage(message));
     }
     return tokenCount;
+}
+
+function getJQuery() {
+    return window.jQuery;
 }
 
 function extractAjaxOptions(args) {
@@ -142,17 +146,28 @@ function isOpenAiCountRequest(url) {
     return u.includes('/api/tokenizers/openai/count');
 }
 
-function patchJQueryAjax() {
-    if (patched || !window.jQuery || !window.jQuery.ajax) return false;
+function ensureOriginalAjaxStored() {
+    const $ = getJQuery();
+    if (!$ || typeof $.ajax !== 'function') return false;
 
-    const originalAjax = window.jQuery.ajax.bind(window.jQuery);
-    patched = true;
+    if (!window.__localTokenizersOriginalAjax) {
+        window.__localTokenizersOriginalAjax = $.ajax.bind($);
+    }
+    return true;
+}
 
-    window.jQuery.ajax = function patchedAjax(...args) {
+function patchAjax() {
+    const $ = getJQuery();
+    if (!$ || typeof $.ajax !== 'function') return false;
+    if (!ensureOriginalAjaxStored()) return false;
+    if (isPatched) return true;
+
+    const originalAjax = window.__localTokenizersOriginalAjax;
+
+    $.ajax = function localTokenizersAjaxPatched(...args) {
         const options = extractAjaxOptions(args);
-        const s = getSettings();
 
-        if (!s.enabled || !isOpenAiCountRequest(options.url)) {
+        if (!isOpenAiCountRequest(options.url)) {
             return originalAjax(...args);
         }
 
@@ -167,15 +182,38 @@ function patchJQueryAjax() {
             }
         }
 
-        const dfd = window.jQuery.Deferred();
+        const dfd = $.Deferred();
         dfd.resolve(payload);
 
         console.debug('[Local Tokenizers] intercepted:', options.url, '=>', token_count);
         return dfd.promise();
     };
 
-    console.info('[Local Tokenizers] ajax hook installed');
+    isPatched = true;
+    console.info('[Local Tokenizers] ajax hook ON');
     return true;
+}
+
+function unpatchAjax() {
+    const $ = getJQuery();
+    if (!$ || typeof $.ajax !== 'function') return false;
+
+    if (window.__localTokenizersOriginalAjax) {
+        $.ajax = window.__localTokenizersOriginalAjax;
+        isPatched = false;
+        console.info('[Local Tokenizers] ajax hook OFF');
+        return true;
+    }
+
+    return false;
+}
+
+function applyEnabledStateImmediately(enabled) {
+    if (enabled) {
+        patchAjax();
+    } else {
+        unpatchAjax();
+    }
 }
 
 function injectSettingsUi() {
@@ -184,8 +222,8 @@ function injectSettingsUi() {
     const html = `
 <div id="local_tokenizers_settings_block" class="inline-drawer">
     <div class="inline-drawer-toggle inline-drawer-header">
-        <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down interactable" tabindex="0" role="button"></div>
         <b>Local Tokenizers</b>
+        <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down interactable" tabindex="0" role="button" style="margin-left:auto;"></div>
     </div>
     <div class="inline-drawer-content">
         <label class="checkbox_label">
@@ -212,7 +250,7 @@ function injectSettingsUi() {
 
     host.insertAdjacentHTML('beforeend', html);
 
-    // 默认折叠，和内置扩展视觉一致
+    // 默认折叠
     const content = document.querySelector('#local_tokenizers_settings_block .inline-drawer-content');
     if (content) {
         content.style.display = 'none';
@@ -233,34 +271,45 @@ function injectSettingsUi() {
     slider.value = String(s.safetyMultiplier);
     number.value = String(s.safetyMultiplier);
 
-    enabled.addEventListener('input', () => {
+    // 开关：立即生效（不刷新）
+    enabled.addEventListener('change', () => {
         s.enabled = !!enabled.checked;
+        applyEnabledStateImmediately(s.enabled);
         saveSettingsDebounced();
     });
 
-    const syncMultiplier = (value) => {
+    // 滑条和数字框：立即生效（下一次拦截立刻用新值）
+    const syncMultiplierImmediate = (value) => {
         s.safetyMultiplier = Number(clamp(value, 1.00, 1.30, DEFAULTS.safetyMultiplier).toFixed(2));
         slider.value = String(s.safetyMultiplier);
         number.value = String(s.safetyMultiplier);
+
+        // 立即生效：拦截函数每次都会读取 getSettings()，无需重载
+        console.debug('[Local Tokenizers] safetyMultiplier =>', s.safetyMultiplier);
         saveSettingsDebounced();
     };
 
-    slider.addEventListener('input', () => syncMultiplier(slider.value));
-    number.addEventListener('input', () => syncMultiplier(number.value));
+    slider.addEventListener('input', () => syncMultiplierImmediate(slider.value));
+    number.addEventListener('input', () => syncMultiplierImmediate(number.value));
 }
 
 function boot() {
-    getSettings();
+    const s = getSettings();
+    applyEnabledStateImmediately(!!s.enabled);
     injectSettingsUi();
 }
 
-// 尽早安装 hook，避免错过早期 token 请求
+// 尽早安装/还原 hook，避免错过早期 token 请求
 (function installHookEarly(retry = 0) {
-    if (patchJQueryAjax()) return;
+    const s = getSettings();
+    const ok = s.enabled ? patchAjax() : unpatchAjax();
+
+    if (ok) return;
+
     if (retry < 120) {
         setTimeout(() => installHookEarly(retry + 1), 50);
     } else {
-        console.warn('[Local Tokenizers] failed to install ajax hook in time');
+        console.warn('[Local Tokenizers] failed to initialize ajax hook in time');
     }
 })();
 
