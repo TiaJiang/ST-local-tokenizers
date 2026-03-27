@@ -184,6 +184,7 @@ function injectSettingsUi() {
     const html = `
 <div id="local_tokenizers_settings_block" class="inline-drawer">
     <div class="inline-drawer-toggle inline-drawer-header">
+        <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down interactable" tabindex="0" role="button"></div>
         <b>Local Tokenizers</b>
     </div>
     <div class="inline-drawer-content">
@@ -210,6 +211,12 @@ function injectSettingsUi() {
         document.body;
 
     host.insertAdjacentHTML('beforeend', html);
+
+    // 默认折叠，和内置扩展视觉一致
+    const content = document.querySelector('#local_tokenizers_settings_block .inline-drawer-content');
+    if (content) {
+        content.style.display = 'none';
+    }
 
     const s = getSettings();
 
@@ -247,7 +254,7 @@ function boot() {
     injectSettingsUi();
 }
 
-// 先尽早安装 ajax hook，避免错过早期请求
+// 尽早安装 hook，避免错过早期 token 请求
 (function installHookEarly(retry = 0) {
     if (patchJQueryAjax()) return;
     if (retry < 120) {
@@ -257,7 +264,6 @@ function boot() {
     }
 })();
 
-// DOM 就绪后再挂设置 UI
 jQuery(() => {
     boot();
 });
